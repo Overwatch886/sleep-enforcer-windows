@@ -19,8 +19,9 @@ class DualLogger:
     """Redirects stdout/stderr to both the terminal console (if available) and a persistent log file."""
     def __init__(self, filepath, terminal_stream):
         self.terminal = terminal_stream
+        self.filepath = filepath
         try:
-            self.log = open(filepath, "a", encoding="utf-8")
+            self.log = open(self.filepath, "a", encoding="utf-8")
         except Exception:
             self.log = None
         
@@ -48,6 +49,19 @@ class DualLogger:
                 self.log.flush()
             except Exception:
                 pass
+    
+    def close(self):
+        if self.terminal is not None:
+            try:
+                self.terminal.close()
+            except Exception:
+                pass
+        if self.log is not None:
+            try:
+                self.log.close()
+            except Exception:
+                pass
+
 
 
 # Relative File Resolver to Help Find Other Non-python resources
