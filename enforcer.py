@@ -484,9 +484,10 @@ class SleepEnforcerApp(tk.Tk):
             self.show_frame("StartupPage")
     
         def show_warning(self):
+            minutes_until_shutdown = int((self.shutdown_time - self.warning_time).total_seconds() // 60)
             self.show_custom_warning(
                 "Bedtime Reminder",
-                "⏰ 5 minutes until shutdown!\n\nPlease wrap up your work."
+                f"⏰ {minutes_until_shutdown} minutes until shutdown!\n\nPlease wrap up your work."
             )
         
         def show_custom_warning(self, title, message):
