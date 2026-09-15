@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 import tkinter as tk
 
 # Import our app
-from sleep_enforcer import SleepEnforcerApp
+from enforcer import SleepEnforcerApp
 
 def run_tests():
     print("[INFO] Starting Sleep Enforcer Headless Unit Tests...")

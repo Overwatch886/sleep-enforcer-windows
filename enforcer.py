@@ -13,6 +13,18 @@ import pystray
 from pystray import MenuItem as item
 from sleep_enforcer import *
 import psutil
+
+# Habit coach brain (no Tkinter inside coach/)
+from coach.store import Store
+from coach.schemas import ActivitySample, EventRecord
+from coach.classifier import Classifier
+from coach.recommender import Recommender
+from coach.explainer import build_explanation
+from coach.activity import get_foreground_program_name
+from pages.coach_page import CoachPage, CoachSession
+from pages.data_page import DataPage
+from pages.feedback_page import FeedbackPopup
+
 # --- Main Application (Controller) ---
 class SleepEnforcerApp(tk.Tk):
         def __init__(self):
@@ -101,20 +113,46 @@ class SleepEnforcerApp(tk.Tk):
                 
                 self.strict_break_mode = True
                 self.is_on_break = False
-                
+
+                # --- Habit coach state (design.md) ---
+                self.coaching_enabled = True
+                self.coach_watch_programs = True
+                self.coach_intensity = "normal"
+                self._open_coach_session = None
+                self.grace_seconds_left = None
+                self._feedback_asked_date = None
+
                 self.settings_file_path = self.get_settings_file_path()
                 self.load_persistent_settings()
+
+                # Coach brain: store + classifier + recommender.
+                # Resilience rule (plan.md NFR): a broken database must never
+                # break enforcement — coach is disabled on failure.
+                self.store = None
+                self.classifier = None
+                self.recommender = None
+                try:
+                    self.store = Store()
+                    self.store.open()
+                    self.classifier = Classifier(self.store)
+                    self.recommender = Recommender(self.store)
+                    print("[DEBUG] Coach store opened.")
+                except Exception as e:
+                    print(f"[WARN] Coach disabled (storage problem): {e}")
+                    self.coaching_enabled = False
+
                 self.load_assets()
                 self.setup_tray()
-        
+
                 # Page frame container
                 container = tk.Frame(self, bg=self.bg_dark)
                 container.pack(side="top", fill="both", expand=True)
                 container.grid_rowconfigure(0, weight=1)
                 container.grid_columnconfigure(0, weight=1)
-        
+
                 self.frames = {}
-                for F in (StartupPage, SettingsPage, ReasonPage, CountdownPage):
+                for F in (StartupPage, SettingsPage, ReasonPage, CountdownPage,
+                          CoachPage, DataPage):
                     page_name = F.__name__
                     frame = F(parent=container, controller=self)
                     self.frames[page_name] = frame
@@ -144,7 +182,10 @@ class SleepEnforcerApp(tk.Tk):
                 "warning_time": self.warning_time_str,
                 "shutdown_time": self.shutdown_time_str,
                 "strict_break_mode": self.strict_break_mode,
-                "wake_time": self.wake_time_str
+                "wake_time": self.wake_time_str,
+                "coaching_enabled": self.coaching_enabled,
+                "coach_watch_programs": self.coach_watch_programs,
+                "coach_intensity": self.coach_intensity
             }
             with open(self.settings_file_path, "w", encoding="utf-8") as settings_file:
                 json.dump(settings_payload, settings_file, indent=2)
@@ -163,7 +204,7 @@ class SleepEnforcerApp(tk.Tk):
                 shutdown_time_str = settings_payload.get("shutdown_time")
                 strict_break_mode = settings_payload.get("strict_break_mode")
                 wake_time_str = settings_payload.get("wake_time")
-    
+
                 if warning_time_str:
                     self.warning_time_str = warning_time_str
                 if shutdown_time_str:
@@ -172,6 +213,13 @@ class SleepEnforcerApp(tk.Tk):
                     self.wake_time_str = wake_time_str
                 if isinstance(strict_break_mode, bool):
                     self.strict_break_mode = strict_break_mode
+                # Coach settings (older settings files simply keep defaults)
+                if isinstance(settings_payload.get("coaching_enabled"), bool):
+                    self.coaching_enabled = settings_payload["coaching_enabled"]
+                if isinstance(settings_payload.get("coach_watch_programs"), bool):
+                    self.coach_watch_programs = settings_payload["coach_watch_programs"]
+                if settings_payload.get("coach_intensity") in ("gentle", "normal", "firm"):
+                    self.coach_intensity = settings_payload["coach_intensity"]
     
                 self.warning_time, self.shutdown_time, self.wake_time = self.get_active_schedule(datetime.now())
                 print(f"[DEBUG] Loaded settings from {self.settings_file_path}")
@@ -449,7 +497,16 @@ class SleepEnforcerApp(tk.Tk):
                 elif self.current_time >= self.shutdown_time and self.current_time <= self.wake_time:
                     print("[DEBUG] User is awake past the sleep time. Ask the user for a reason")
                     self.show_reason_prompt()
-                
+
+                # Morning feedback window: shortly after wake time, offer
+                # the one-question next-day popup (once per morning).
+                if (self.store is not None
+                        and self.current_time > self.wake_time
+                        and not getattr(self, "_feedback_asked_date", None)
+                                == self.current_time.date()):
+                    self._feedback_asked_date = self.current_time.date()
+                    self.maybe_ask_feedback()
+
                 self.after(60000, self.check_time)
             else:
                 print(f"[DEBUG] Grace/Final timer is still active, check back in 1 minute")
@@ -521,7 +578,12 @@ class SleepEnforcerApp(tk.Tk):
     
         def show_reason_prompt(self):
             self.no_of_reason_trials = 3
-            
+
+            if self.coaching_enabled and self.store is not None:
+                self.start_coach_session()
+                return
+
+            # Fallback: the original keyword reason prompt (unchanged)
             # Sync Attempts GUI immediately
             reason_page = self.frames["ReasonPage"]
             reason_page.reason_trials_limiter.config(text=f"Attempts remaining: {self.no_of_reason_trials}")
@@ -539,6 +601,19 @@ class SleepEnforcerApp(tk.Tk):
             if self.grace_timer_active:
                 self.grace_timer_active = False
                 print("[DEBUG] Grace timer timed out")
+                # Coach: record that the user didn't answer (US: no answer
+                # never bypasses enforcement)
+                if self._open_coach_session is not None:
+                    session = self._open_coach_session
+                    self._open_coach_session = None
+                    try:
+                        self.frames["CoachPage"].stop_timers()
+                    except Exception:
+                        pass
+                    try:
+                        self.store.resolve_event(session.event_id, choice="no_answer")
+                    except Exception as e:
+                        print(f"[DEBUG] no_answer resolve failed: {e}")
                 self.show_final_countdown()
         
         def check_reason(self):
@@ -569,6 +644,162 @@ class SleepEnforcerApp(tk.Tk):
                 self.handle_invalid_reasons()
                 
             reason_entry.delete(0, 'end')
+
+        # =====================================================
+        # Habit coach flow (design.md section 7 — choice handoff)
+        # =====================================================
+
+        def start_coach_session(self):
+            """Open the bedtime coach screen. Same grace timer rules as the
+            old reason prompt: no answer when it expires -> final countdown."""
+            print("[DEBUG] Starting coach session")
+            self.grace_timer_active = True
+            self.grace_seconds_left = self.grace_period
+
+            # 1. What's in front of the user right now (name only, opt-out in settings)
+            program_name = ""
+            if self.coach_watch_programs:
+                program_name = get_foreground_program_name()
+
+            classification = self.classifier.classify(program_name)
+            extension_available = not self.store.extension_used_tonight()
+
+            session = CoachSession(
+                program_name=program_name,
+                classification=classification,
+                extension_available=extension_available,
+                extension_minutes=self.extension_minutes,
+            )
+
+            # 2. Open the event row immediately so the night is recorded
+            #    even if the user never answers (choice filled on resolve).
+            session.event_id = self.store.save_event(
+                EventRecord(
+                    started_at=datetime.now(),
+                    schedule_bedtime=self.shutdown_time,
+                    task=session.task,
+                    activity=ActivitySample(
+                        program_name=program_name,
+                        mapped_category=classification.category,
+                    ),
+                )
+            )
+
+            # 3. Think: score the four options, build the explanation.
+            session.recommendation = self.recommender.recommend(
+                session.task,
+                extension_available=extension_available,
+                extension_minutes=self.extension_minutes,
+                strict_break_mode=self.strict_break_mode,
+            )
+            session.recommendation.explanation = build_explanation(
+                session.recommendation, session.task, self.extension_minutes)
+
+            self._open_coach_session = session
+            self.attributes("-topmost", True)
+            self.show_frame("CoachPage")
+            self.frames["CoachPage"].start_session(session)
+
+            # 4. Grace countdown — same safety net as before.
+            self._countdown_grace()
+
+        def _countdown_grace(self):
+            if not self.grace_timer_active or self._open_coach_session is None:
+                return
+            self.grace_seconds_left -= 1
+            if self.grace_seconds_left <= 0:
+                self.handle_grace_timeout()
+                return
+            self.after(1000, self._countdown_grace)
+
+        def coach_fix_guess(self, session, corrected_category, make_rule=False):
+            """User corrected the app's guess (US-2: adds, never rewrites)."""
+            try:
+                self.classifier.learn_correction(
+                    session.event_id, session.program_name,
+                    session.classification.category, corrected_category,
+                    make_rule=make_rule)
+                session.task.category = corrected_category
+            except Exception as e:
+                print(f"[DEBUG] coach_fix_guess failed: {e}")
+
+        def coach_choose(self, session, choice):
+            """Hand the user's choice to the existing enforcement machine."""
+            print(f"[DEBUG] Coach choice: {choice}")
+            self.grace_timer_active = False
+            self._open_coach_session = None
+            try:
+                self.frames["CoachPage"].stop_timers()
+            except Exception:
+                pass
+
+            followed = (choice == session.recommendation.recommended_choice)
+
+            if choice == "sleep":
+                self.store.resolve_event(
+                    session.event_id, choice="sleep",
+                    recommended_choice=session.recommendation.recommended_choice,
+                    recommendation_followed=followed)
+                self.show_final_countdown()
+
+            elif choice == "replan":
+                replan_title = (session.task.description or
+                                session.task.category or "Untitled task")
+                self.store.save_replan(
+                    session.event_id, replan_title,
+                    target_time=datetime.now() + timedelta(hours=12),
+                    est_minutes=session.task.est_minutes)
+                self.store.resolve_event(
+                    session.event_id, choice="replan",
+                    recommended_choice=session.recommendation.recommended_choice,
+                    recommendation_followed=followed)
+                self.show_custom_warning(
+                    "Task saved for later",
+                    f"📅 '{replan_title}' is saved with a slot tomorrow.\n"
+                    f"Time to sleep.")
+                self.show_final_countdown()
+
+            elif choice == "continue":
+                if not session.extension_available:
+                    # Should not happen (button is disabled) — refuse safely.
+                    self.show_custom_warning(
+                        "Extension used",
+                        "Tonight's extension is already used up. Time to sleep.")
+                    return
+                self.extension_active = True
+                self.store.resolve_event(
+                    session.event_id, choice="continue", extension_used=True,
+                    recommended_choice=session.recommendation.recommended_choice,
+                    recommendation_followed=followed)
+                self.grant_extension()
+                self.show_custom_warning(
+                    "Extension Granted",
+                    f"✅ You have {self.extension_minutes} more minutes.\n"
+                    f"That's the only one tonight — after this, it's sleep.")
+                if self.strict_break_mode:
+                    self.take_5mins_break()
+                else:
+                    self.frames["StartupPage"].update_status()
+                    self.show_frame("StartupPage")
+
+            elif choice == "break":
+                self.store.resolve_event(
+                    session.event_id, choice="break",
+                    recommended_choice=session.recommendation.recommended_choice,
+                    recommendation_followed=followed)
+                self.take_5mins_break()
+
+        def maybe_ask_feedback(self):
+            """After wake time: offer the one-question next-day popup."""
+            if self.store is None:
+                return
+            try:
+                pending = self.store.events_needing_feedback(limit=1)
+                if pending:
+                    FeedbackPopup(self, pending[0])
+            except Exception as e:
+                print(f"[DEBUG] Feedback popup failed: {e}")
+
     
         def take_5mins_break(self):
             """5-minute break timer (non-blocking layout)"""

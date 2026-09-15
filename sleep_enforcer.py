@@ -135,7 +135,9 @@ class StartupPage(tk.Frame):
         actions = tk.Frame(self, bg=self['bg'])
         actions.pack(pady=20)
         settings_btn = ttk.Button(actions, text="⚙️ Settings", command=lambda: controller.show_frame("SettingsPage"))
-        settings_btn.pack(ipadx=12, ipady=8)
+        settings_btn.pack(side='left', padx=5, ipadx=12, ipady=8)
+        coach_btn = ttk.Button(actions, text="🧠 Coach & Data", command=lambda: controller.show_frame("DataPage"))
+        coach_btn.pack(side='left', padx=5, ipadx=12, ipady=8)
 
     def update_status(self):
         """Updates the time labels when called by the controller."""
