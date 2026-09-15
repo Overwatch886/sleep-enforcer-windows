@@ -2,11 +2,28 @@
 
 
 a = Analysis(
-    ['sleep_enforcer.py'],
-    pathex=[],
+    ['main.py'],
+    pathex=['.'],
     binaries=[],
     datas=[('icons', 'icons')],
-    hiddenimports=[],
+    hiddenimports=[
+        # Our own modules: the app dir contains __init__.py, which makes
+        # PyInstaller treat it as a package and miss plain sibling imports.
+        'enforcer',
+        'sleep_enforcer',
+        'coach',
+        'coach.schemas',
+        'coach.store',
+        'coach.classifier',
+        'coach.recommender',
+        'coach.explainer',
+        'coach.patterns',
+        'coach.activity',
+        'pages',
+        'pages.coach_page',
+        'pages.data_page',
+        'pages.feedback_page',
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -15,7 +32,7 @@ a = Analysis(
     optimize=0,
 )
 pyz = PYZ(a.pure)
-version = "1.3.2"
+version = "1.4.0"
 exe = EXE(
     pyz,
     a.scripts,
