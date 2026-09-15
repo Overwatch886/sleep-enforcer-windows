@@ -23,6 +23,11 @@ DB_FILE_NAME = "sleep_enforcer.db"
 
 
 def default_db_path() -> str:
+    # Tests can point the store at a throwaway database with
+    # COACH_DB_OVERRIDE so real history is never touched.
+    override = os.getenv("COACH_DB_OVERRIDE")
+    if override:
+        return override
     app_data_dir = os.getenv("LOCALAPPDATA") or os.path.expanduser("~")
     return os.path.join(app_data_dir, "SleepEnforcer", DB_FILE_NAME)
 
