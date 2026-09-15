@@ -10,7 +10,7 @@ start_session() before raising this frame.
 import tkinter as tk
 from tkinter import ttk
 
-from coach.explainer import build_comparison, choice_label
+from coach.explainer import build_comparison, build_explanation, choice_label
 from coach.schemas import CATEGORIES, Recommendation, TaskDetails
 
 DURATION_OPTIONS = (15, 30, 45, 60, 90, 120)
