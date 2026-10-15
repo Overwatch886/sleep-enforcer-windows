@@ -437,13 +437,18 @@ class SleepEnforcerApp(tk.Tk):
             
             self.withdraw()
             if hasattr(self, 'tray_icon'):
-                try:
-                    self.tray_icon.notify(
-                        "Sleep Enforcer is running in the background. Check Notification Tray.",
-                        "Nice try! I'm still here. 👀" 
-                    )
-                except Exception as e:
-                    print(f"[ERROR] Notification failed: {e}")
+                # Use after() to let the tray icon settle before sending the notification
+                self.after(300, self._send_background_notification)
+
+        def _send_background_notification(self):
+            """Sends the background-running notification via the tray icon."""
+            try:
+                self.tray_icon.notify(
+                    "Nice try! I'm still here. 👀",
+                    "Sleep Enforcer is running in the background. Check Notification Tray.",
+                )
+            except Exception as e:
+                print(f"[ERROR] Notification failed: {e}")
     
         def restore_window_on_minimize(self, event):
             if event.widget == self and self.is_on_break:
