@@ -382,7 +382,6 @@ class SleepEnforcerApp(tk.Tk):
             try:
                 notification_menu = (
                     item('Open Sleep Enforcer', self.show_window),
-                    item('Exit Application', self.exit_app)
                 )
     
                 try:
